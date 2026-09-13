@@ -18,6 +18,11 @@ class KeyMotion:
     def held(self) -> bool:
         return self._direction != 0
 
+    @property
+    def direction(self) -> int:
+        """The held key's direction, or 0 when no key is held."""
+        return self._direction
+
     def press(self, direction: int, now: float) -> None:
         if direction == self._direction:
             return  # key repeat

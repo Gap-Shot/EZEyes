@@ -7,6 +7,7 @@ import math
 import os
 import re
 import sys
+import tempfile
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
@@ -58,7 +59,12 @@ def validated(settings: Settings) -> Settings:
 
 
 def _clamped(value, low, high, default):
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    try:
+        if not math.isfinite(value):
+            return default
+    except OverflowError:  # an int too large to be a float
         return default
     value = min(max(value, low), high)
     return round(value) if isinstance(default, int) else float(value)
@@ -87,22 +93,35 @@ def settings_path() -> Path:
 
 
 def load(path: Path) -> Settings:
+    """The settings saved at `path`, or the defaults if there are none or they can't be used."""
     try:
-        text = path.read_text(encoding="utf-8")
+        data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return DEFAULTS
     except OSError as error:
         print(f"easyeyes: can't read {path}: {error}", file=sys.stderr)
         return DEFAULTS
-    try:
-        return from_dict(json.loads(text))
-    except json.JSONDecodeError as error:
+    # ValueError covers invalid UTF-8, invalid JSON and integers past Python's digit limit.
+    except (ValueError, RecursionError) as error:
         print(f"easyeyes: ignoring invalid settings in {path}: {error}", file=sys.stderr)
         return DEFAULTS
+    return from_dict(data)
 
 
 def save(settings: Settings, path: Path) -> None:
+    """Replace the settings file atomically, writing through it if it's a symlink."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(to_dict(settings), indent=2) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+    target = path.resolve()
+    text = json.dumps(to_dict(settings), indent=2) + "\n"
+    # A unique temporary file, so two instances saving at once never write into the same one.
+    file = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=target.parent, prefix=f".{target.name}.", suffix=".tmp", delete=False)
+    try:
+        with file:
+            file.write(text)
+            if target.exists():  # keep its permissions; a new file stays private to the user
+                os.fchmod(file.fileno(), target.stat().st_mode & 0o777)
+        os.replace(file.name, target)
+    except BaseException:
+        Path(file.name).unlink(missing_ok=True)
+        raise

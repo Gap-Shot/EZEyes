@@ -7,6 +7,8 @@ import signal
 import sys
 import threading
 import time
+import traceback
+from collections.abc import Callable
 
 import gi
 
@@ -30,6 +32,7 @@ class EasyEyesApp(Gtk.Application):
     def __init__(self) -> None:
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE)
         self._supported = True
+        self._started = False
         self._settings_path = settings.settings_path()
         self._settings_window: SettingsWindow | None = None
         self._save_timer = 0
@@ -39,14 +42,23 @@ class EasyEyesApp(Gtk.Application):
         if not GtkLayerShell.is_supported():
             self._supported = False
             return
+        try:
+            self._start()
+        except Exception:
+            # Without hold() the process exits after this launch, instead of lingering broken on the app ID
+            # and swallowing every later command.
+            traceback.print_exc()
+            return
+        self._started = True
         self.hold()  # keep running with no windows open
 
+    def _start(self) -> None:
         self.ruler = Ruler(settings.load(self._settings_path))
         self.monitors = Monitors(Gdk.Display.get_default(), self._on_monitors_changed)
         self.overlays = Overlays(self.ruler, self.monitors)
         self.tray = Tray(self.ruler.toggle_visibility, self.ruler.enter_move_mode, self.open_settings, self.quit)
         self.hotkeys = GlobalShortcuts(APP_ID, self._on_hotkey, self._on_hotkeys_changed)
-        self.watchdog = Watchdog()
+        self.watchdog = Watchdog(self._save_now)
 
         self.ruler.subscribe(self._on_ruler_changed)
         if self.ruler.settings.monitor is None and self.monitors.keys:
@@ -59,6 +71,9 @@ class EasyEyesApp(Gtk.Application):
     def do_command_line(self, command_line: Gio.ApplicationCommandLine) -> int:
         if not self._supported:
             self._show_unsupported()
+            return 1
+        if not self._started:
+            command_line.printerr_literal("easyeyes: EasyEyes couldn't start; the error is shown above.\n")
             return 1
         try:
             command = cli.parse(command_line.get_arguments()[1:])
@@ -90,11 +105,14 @@ class EasyEyesApp(Gtk.Application):
         self._settings_window.present()
 
     def _on_ruler_changed(self, change: Change) -> None:
-        self.watchdog.armed = self.ruler.move_mode
+        # Arm the watchdog before the overlays take input, and disarm it only once they've let go.
+        if self.ruler.move_mode:
+            self.watchdog.armed = True
         if change & (Change.VISIBILITY | Change.MOVE_MODE | Change.MONITOR):
             self.overlays.sync()
         elif change & (Change.POSITION | Change.APPEARANCE):
             self.overlays.refresh()
+        self.watchdog.armed = self.ruler.move_mode
         if change & Change.VISIBILITY:
             self.tray.set_ruler_visible(self.ruler.visible)
         if change & SETTINGS_CHANGES and not self._save_timer:
@@ -147,9 +165,11 @@ class Watchdog:
     """Quits EasyEyes if it stops responding while Move mode holds the keyboard and mouse, so you get them back."""
 
     STALL_SECONDS = 10
+    SAVE_SECONDS = 2  # how long a last save may take before quitting anyway
 
-    def __init__(self) -> None:
+    def __init__(self, save: Callable[[], None]) -> None:
         self.armed = False
+        self._save = save
         self._heartbeat = time.monotonic()
         GLib.timeout_add(500, self._beat)
         threading.Thread(target=self._watch, name="easyeyes-watchdog", daemon=True).start()
@@ -163,4 +183,8 @@ class Watchdog:
             time.sleep(1)
             if self.armed and time.monotonic() - self._heartbeat > self.STALL_SECONDS:
                 os.write(2, b"easyeyes: stopped responding in Move mode; quitting to release the keyboard and mouse\n")
+                # Keep the ruler's latest position, but never let a slow disk hold the keyboard and mouse longer.
+                saver = threading.Thread(target=self._save, name="easyeyes-last-save", daemon=True)
+                saver.start()
+                saver.join(self.SAVE_SECONDS)
                 os._exit(3)

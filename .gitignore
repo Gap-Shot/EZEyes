@@ -1,5 +1,21 @@
+# Python caches and environments
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
 *.egg-info/
+
+# Development notes, design docs, tests and reviews: not needed to install or run EasyEyes
+/CONTEXT.md
+/Idea
+/claudeWebReasoning
+/REVIEW.md
+/docs/
+/tests/
+
+# Editor and assistant settings
+.claude/
+/CLAUDE.md
+.idea/
+.vscode/
+*.swp

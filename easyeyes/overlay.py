@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import traceback
 from dataclasses import dataclass
 
 import cairo
@@ -90,18 +91,19 @@ class OverlayWindow(Gtk.Window):
         """Catch clicks (Move mode) or let them fall through to the windows below."""
         if capturing == self._capturing:
             return
+        # None means the whole surface takes input; an empty region means none of it does.
+        # The state is recorded only after the call succeeds, so a failed release gets retried.
+        self.input_shape_combine_region(None if capturing else cairo.Region())
         self._capturing = capturing
         self._dragging = False
-        # None means the whole surface takes input; an empty region means none of it does.
-        self.input_shape_combine_region(None if capturing else cairo.Region())
         self.queue_draw()  # a commit carries the new input region to the compositor
 
     def set_keyboard_exclusive(self, exclusive: bool) -> None:
         if exclusive == self._keyboard:
             return
-        self._keyboard = exclusive
         mode = GtkLayerShell.KeyboardMode.EXCLUSIVE if exclusive else GtkLayerShell.KeyboardMode.NONE
         GtkLayerShell.set_keyboard_mode(self, mode)
+        self._keyboard = exclusive
         self.queue_draw()
 
     def refresh(self) -> None:
@@ -187,11 +189,15 @@ class Overlays:
         self._keyboard_owner: OverlayWindow | None = None
         self._ruler_monitor: str | None = None
         self._motion = KeyMotion()
+        self._held_keycode: int | None = None
         self._glide_timer = 0
 
     def sync(self) -> None:
         """Create, remove and reconfigure overlays to match the ruler's state."""
         ruler = self._ruler
+        if not ruler.move_mode:
+            # Give the keyboard and mouse back before anything that could fail.
+            self.release_input()
         connected = self._monitors.keys
         self._ruler_monitor = ruler.effective_monitor(connected)
         if not ruler.visible or self._ruler_monitor is None:
@@ -210,10 +216,7 @@ class Overlays:
             if info.key in wanted and info.key not in self._windows:
                 self._windows[info.key] = OverlayWindow(info, self)
 
-        if not ruler.move_mode:
-            self._keyboard_owner = None
-            self._stop_motion()
-        elif self._keyboard_owner is None:
+        if ruler.move_mode and self._keyboard_owner is None:
             # Keep the keyboard on one surface for the whole of Move mode, even if the ruler changes monitors.
             self._keyboard_owner = self._windows.get(self._ruler_monitor)
 
@@ -223,8 +226,21 @@ class Overlays:
             window.show_all()
             window.refresh()
 
+    def release_input(self) -> None:
+        """Stop catching keys and clicks on every overlay, one window at a time so a failure can't block the rest."""
+        self._stop_motion()
+        self._keyboard_owner = None
+        for window in list(self._windows.values()):
+            try:
+                window.set_keyboard_exclusive(False)
+                window.set_capturing(False)
+            except Exception:
+                traceback.print_exc()
+
     def rebuild(self) -> None:
         """Start over after monitors are plugged in or out, since old surfaces may point at gone monitors."""
+        # Destroying the keyboard's surface can swallow the key-up, so stop any Glide first.
+        self._stop_motion()
         for window in self._windows.values():
             window.destroy()
         self._windows.clear()
@@ -256,27 +272,36 @@ class Overlays:
         # Leaving comes first and does as little as possible, so it keeps working if anything else breaks.
         alt_f9 = event.keyval == Gdk.KEY_F9 and event.state & Gdk.ModifierType.MOD1_MASK
         if event.keyval in _LEAVE_KEYS or alt_f9:
-            self._ruler.leave_move_mode()
+            try:
+                self._ruler.leave_move_mode()
+            finally:
+                # Also release directly: if an earlier sync failed partway, leave_move_mode has nothing left to do.
+                if not self._ruler.move_mode:
+                    self.release_input()
             return
         direction = _DIRECTIONS.get(event.keyval)
         if direction is None:
             return  # every other key is ignored in Move mode
+        self._held_keycode = event.hardware_keycode
         self._motion.press(direction, time.monotonic())
         if not self._glide_timer:
             self._glide_timer = GLib.timeout_add(_GLIDE_INTERVAL_MS, self._on_glide_timer)
 
     def key_released(self, event) -> None:
-        direction = _DIRECTIONS.get(event.keyval)
-        if direction is None:
+        # Match the physical key rather than its keyval, which can change mid-hold (NumLock, a layout switch).
+        if not self._motion.held or event.hardware_keycode != self._held_keycode:
             return
         settings = self._ruler.settings
-        distance = self._motion.release(direction, time.monotonic(), settings.text_line_spacing, settings.glide_speed)
+        distance = self._motion.release(self._motion.direction, time.monotonic(),
+                                        settings.text_line_spacing, settings.glide_speed)
+        self._held_keycode = None
         if distance:
             self._move_by(distance)
 
     def keyboard_lost(self) -> None:
         # The key-up may never arrive once focus is gone, so stop any Glide now.
         self._motion.cancel()
+        self._held_keycode = None
 
     def _on_glide_timer(self) -> bool:
         if not self._motion.held:
@@ -294,6 +319,7 @@ class Overlays:
 
     def _stop_motion(self) -> None:
         self._motion.cancel()
+        self._held_keycode = None
         if self._glide_timer:
             GLib.source_remove(self._glide_timer)
             self._glide_timer = 0

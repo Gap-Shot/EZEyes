@@ -5,6 +5,7 @@ The entry file itself is the setting, so turning autostart on or off in the desk
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -20,7 +21,17 @@ def autostart_path() -> Path:
 
 
 def launcher() -> str:
-    return shutil.which("easyeyes") or str(Path.home() / ".local" / "bin" / "easyeyes")
+    """The command the login entry runs, preferring the one install.sh puts in ~/.local/bin.
+
+    The entry runs it at every login, so a relative or shadowing `easyeyes` that's first on PATH today mustn't win.
+    """
+    installed = Path.home() / ".local" / "bin" / "easyeyes"
+    if installed.is_file() and os.access(installed, os.X_OK):
+        return str(installed)
+    found = shutil.which("easyeyes")
+    if found and os.path.isabs(found):
+        return str(Path(found).resolve())
+    return str(installed)
 
 
 def exec_argument(argument: str) -> str:
@@ -32,13 +43,22 @@ def exec_argument(argument: str) -> str:
     return '"' + escaped.replace("\\", "\\\\").replace("%", "%%") + '"'
 
 
+def exec_program(executable: str) -> str:
+    """The quoted program at the start of an Exec value.
+
+    GIO looks for the program before it unescapes %%, so it can't find one with % in its path; env is found instead.
+    """
+    quoted = exec_argument(executable)
+    return f"/usr/bin/env {quoted}" if "%" in executable else quoted
+
+
 def entry(executable: str) -> str:
     return (
         "[Desktop Entry]\n"
         "Type=Application\n"
         "Name=EasyEyes\n"
         "Comment=Draw a reading ruler over every window\n"
-        f"Exec={exec_argument(executable)} --autostart\n"
+        f"Exec={exec_program(executable)} --autostart\n"
         f"Icon={APP_ID}\n"
         "Terminal=false\n"
     )

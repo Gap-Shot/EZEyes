@@ -15,7 +15,7 @@ from . import APP_ID, autostart  # noqa: E402
 from .hotkeys import MOVE_MODE, TOGGLE_RULER, GlobalShortcuts, Status  # noqa: E402
 from .monitors import Monitors  # noqa: E402
 from .ruler import Change, Ruler  # noqa: E402
-from .settings import LIMITS  # noqa: E402
+from .settings import DEFAULTS, LIMITS  # noqa: E402
 
 _NO_HOTKEYS = ("Your desktop didn't give EasyEyes any hotkeys. You can bind keys in your compositor's "
                "config to the commands “easyeyes toggle” and “easyeyes move”.")
@@ -145,7 +145,11 @@ class SettingsWindow(Gtk.Window):
 
     def _add_number(self, text: str, name: str, unit: str) -> Gtk.SpinButton:
         low, high = LIMITS[name]
-        spin = Gtk.SpinButton.new_with_range(low, high, 1)
+        # Whole-number digits would round a fractional value, and the next focus-out would save that.
+        fractional = isinstance(getattr(DEFAULTS, name), float)
+        spin = Gtk.SpinButton.new_with_range(low, high, 0.5 if fractional else 1)
+        if fractional:
+            spin.set_digits(1)
         spin.connect("value-changed", lambda button: self._update(**{name: button.get_value()}))
         box = Gtk.Box(spacing=6, halign=Gtk.Align.END)
         box.pack_start(spin, False, False, 0)
