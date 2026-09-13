@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=EasyEyes
+GenericName=Reading Ruler
+Comment=Draw a reading ruler over every window
+Exec=@EXEC@
+Icon=io.github.Gap_Shot.EasyEyes
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=reading;ruler;guide;lines;
+StartupNotify=false
